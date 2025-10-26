@@ -244,7 +244,7 @@ end
 
 
 %% Structural Load Calculation Function
-function [CltforceMatrix, controlPoints] = Structural(coordinates, Cp, CD, CL, conditions, tau)
+function [CltforceMatrix, controlPoints] = Structural(coordinates, Cp, CD, CL, conditions, tau,Tadditional)
 % Overview:
 % Conducts Force and Moment analysis on a thin airfoil skin for classical laminate theory derived from compressible flow relations and mechanics of materials;
 
@@ -366,7 +366,7 @@ function [CltforceMatrix, controlPoints] = Structural(coordinates, Cp, CD, CL, c
     % Calculate torsional moment and shear flow
     M_torsion = Cm_centroid * Q * chord^2;  % N·m/m (torsional moment per unit span)
     areaMean = 0.5 * abs(sum(areavector));  % Enclosed area
-    shearflow = M_torsion / (2 * areaMean); % N/m (shear flow)
+    shearflow = (M_torsion + Tadditional) / (2 * areaMean); % N/m (shear flow)
     
     
     
@@ -375,7 +375,7 @@ function [CltforceMatrix, controlPoints] = Structural(coordinates, Cp, CD, CL, c
 
         % Local bending moment per unit span from pressure
         Cp_avg = (Cp(i) + Cp(i+1)) / 2;
-        MxLocal = -(Cp_avg * Q * controlLength(i) )/ 8;
+        MxLocal = -(Cp_avg * Q * controlLength(i) );
         
         % Force resultants (Classical Laminate Theory format)
         CltforceMatrix(i, 1) = 0;                         % Nx (N/m)
@@ -466,9 +466,10 @@ Conditions = table2array(structuralInput(1:6, 6));
 Tau = table2array(structuralInput(1, 7));
 NumPlies = table2array(structuralInput(2, 7));
 Coordinates = [Xcoords, Ycoords];
+Tadditional = 0;
 
 % Perform structural analysis:
-[CltforceMatrix, controlPoints] = Structural(Coordinates, Cpdist, Cd, Cl, Conditions, Tau);
+[CltforceMatrix, controlPoints] = Structural(Coordinates, Cpdist, Cd, Cl, Conditions, Tau,Tadditional);
 
 
 
@@ -866,3 +867,252 @@ if nParams >= 3
 end
 
 fprintf('Analysis complete! Navigate between tabs to view different analyses.\n\n');
+
+
+%% Run Single Analysis with Mean Parameters
+fprintf('\n╔════════════════════════════════════════════════════════════╗\n');
+fprintf('║              BASELINE ANALYSIS (MEAN CASE)                 ║\n');
+fprintf('╚════════════════════════════════════════════════════════════╝\n\n');
+
+% Use mean parameters for baseline
+BaselineParams = Pmean;
+
+% Ensure PlyAngles is a column vector for proper array sizing
+PlyAnglesCol = PlyAngles(:);
+
+% Initialize storage for baseline results
+nControlPts = size(CltforceMatrix, 1);
+BaselineData = struct('Location', cell(nControlPts, 1));
+
+% Run analysis at each control point
+for j = 1:nControlPts
+    BaselineData(j).Location = CompLT(BaselineParams, PlyAnglesCol, ...
+        CltforceMatrix(j, :)', Tau/NumPlies, deltaT);
+    BaselineData(j).ControlPoint = controlPoints(j, :);
+end
+
+% Debug check
+fprintf('First result check:\n');
+fprintf('  PlyStresses.local size: [%s]\n', num2str(size(BaselineData(1).Location.PlyStresses.local)));
+fprintf('  Expected: [%d 3 3]\n\n', length(PlyAnglesCol));
+
+%% Extract Data for Plotting
+nPlies = length(PlyAnglesCol);
+
+% Check if we have valid data
+actualNumPlies = size(BaselineData(1).Location.PlyStresses.local, 1);
+if actualNumPlies ~= nPlies
+    warning('Expected %d plies but got %d. Check PlyAngles vector orientation.', nPlies, actualNumPlies);
+    nPlies = actualNumPlies;
+end
+fprintf('\n');
+
+% Initialize arrays
+stressBottom = zeros(nControlPts, nPlies, 3);  % [sigma1, sigma2, tau12]
+stressMid = zeros(nControlPts, nPlies, 3);
+stressTop = zeros(nControlPts, nPlies, 3);
+TWBottom = zeros(nControlPts, nPlies);
+TWMid = zeros(nControlPts, nPlies);
+TWTop = zeros(nControlPts, nPlies);
+
+% Extract strain and curvature (same for all plies at each location)
+epsilon0 = zeros(nControlPts, 3);
+kappa = zeros(nControlPts, 3);
+
+for j = 1:nControlPts
+    % Strains and curvatures
+    epsilon0(j, :) = BaselineData(j).Location.StrainVector(1:3)';
+    kappa(j, :) = BaselineData(j).Location.StrainVector(4:6)';
+    
+    % Extract stresses - the structure has all plies in dimension 1
+    % Structure is [nPlies, 3 z-locations, 3 stress components]
+    localStress = BaselineData(j).Location.PlyStresses.local;
+    TWvals = BaselineData(j).Location.TW_criterion;
+    
+    % Get actual number of plies in this result
+    nPliesInResult = size(localStress, 1);
+    
+    % Stresses and TW at three locations per ply
+    for i = 1:min(nPlies, nPliesInResult)
+        % Extract stresses at bottom (z-location 1), mid (2), top (3)
+        stressBottom(j, i, :) = squeeze(localStress(i, 1, :));
+        stressMid(j, i, :) = squeeze(localStress(i, 2, :));
+        stressTop(j, i, :) = squeeze(localStress(i, 3, :));
+        
+        TWBottom(j, i) = TWvals(i, 1);
+        TWMid(j, i) = TWvals(i, 2);
+        TWTop(j, i) = TWvals(i, 3);
+    end
+end
+
+
+%% ========================================================================
+%% TAB 4: PLY STRESSES (BASELINE)
+%% ========================================================================
+tab4 = uitab(tg, 'Title', 'Baseline: Ply Stresses');
+
+% Find global stress limits for consistent scaling
+allStresses = cat(1, stressBottom(:), stressMid(:), stressTop(:));
+stressLim = max(abs(allStresses)) * 1.1;
+
+for plyIdx = 1:nPlies
+    % Sigma1 (Longitudinal)
+    subplot(nPlies, 3, (plyIdx-1)*3 + 1, 'Parent', tab4);
+    hold on;
+    plot(1:nControlPts, stressBottom(:, plyIdx, 1)/1e6, 'b-', 'LineWidth', 1.5, ...
+        'DisplayName', 'Bottom');
+    plot(1:nControlPts, stressMid(:, plyIdx, 1)/1e6, 'g-', 'LineWidth', 2, ...
+        'DisplayName', 'Mid');
+    plot(1:nControlPts, stressTop(:, plyIdx, 1)/1e6, 'r-', 'LineWidth', 1.5, ...
+        'DisplayName', 'Top');
+    yline(0, 'k--', 'LineWidth', 0.5);
+    xlabel('Control Point');
+    ylabel('\sigma_1 (MPa)');
+    title(sprintf('Ply %d (%d°) - Longitudinal Stress', plyIdx, PlyAngles(plyIdx)));
+    legend('Location', 'best');
+    grid on;
+    ylim([-stressLim/1e6, stressLim/1e6]);
+    
+    % Sigma2 (Transverse)
+    subplot(nPlies, 3, (plyIdx-1)*3 + 2, 'Parent', tab4);
+    hold on;
+    plot(1:nControlPts, stressBottom(:, plyIdx, 2)/1e6, 'b-', 'LineWidth', 1.5);
+    plot(1:nControlPts, stressMid(:, plyIdx, 2)/1e6, 'g-', 'LineWidth', 2);
+    plot(1:nControlPts, stressTop(:, plyIdx, 2)/1e6, 'r-', 'LineWidth', 1.5);
+    yline(0, 'k--', 'LineWidth', 0.5);
+    xlabel('Control Point');
+    ylabel('\sigma_2 (MPa)');
+    title(sprintf('Ply %d (%d°) - Transverse Stress', plyIdx, PlyAngles(plyIdx)));
+    grid on;
+    ylim([-stressLim/1e6, stressLim/1e6]);
+    
+    % Tau12 (Shear)
+    subplot(nPlies, 3, (plyIdx-1)*3 + 3, 'Parent', tab4);
+    hold on;
+    plot(1:nControlPts, stressBottom(:, plyIdx, 3)/1e6, 'b-', 'LineWidth', 1.5);
+    plot(1:nControlPts, stressMid(:, plyIdx, 3)/1e6, 'g-', 'LineWidth', 2);
+    plot(1:nControlPts, stressTop(:, plyIdx, 3)/1e6, 'r-', 'LineWidth', 1.5);
+    yline(0, 'k--', 'LineWidth', 0.5);
+    xlabel('Control Point');
+    ylabel('\tau_{12} (MPa)');
+    title(sprintf('Ply %d (%d°) - Shear Stress', plyIdx, PlyAngles(plyIdx)));
+    grid on;
+    ylim([-stressLim/1e6, stressLim/1e6]);
+end
+
+%% ========================================================================
+%% TAB 5: STRAINS AND CURVATURES (BASELINE)
+%% ========================================================================
+tab5 = uitab(tg, 'Title', 'Baseline: Strains & Curvatures');
+
+% Midplane Strains
+subplot(2, 3, 1, 'Parent', tab5);
+plot(1:nControlPts, epsilon0(:, 1)*1e6, 'b-', 'LineWidth', 2);
+xlabel('Control Point');
+ylabel('\epsilon_x^0 (\mu\epsilon)');
+title('Midplane Strain - X Direction');
+grid on;
+yline(0, 'k--', 'LineWidth', 0.5);
+
+subplot(2, 3, 2, 'Parent', tab5);
+plot(1:nControlPts, epsilon0(:, 2)*1e6, 'r-', 'LineWidth', 2);
+xlabel('Control Point');
+ylabel('\epsilon_y^0 (\mu\epsilon)');
+title('Midplane Strain - Y Direction');
+grid on;
+yline(0, 'k--', 'LineWidth', 0.5);
+
+subplot(2, 3, 3, 'Parent', tab5);
+plot(1:nControlPts, epsilon0(:, 3)*1e6, 'g-', 'LineWidth', 2);
+xlabel('Control Point');
+ylabel('\gamma_{xy}^0 (\mu\epsilon)');
+title('Midplane Shear Strain');
+grid on;
+yline(0, 'k--', 'LineWidth', 0.5);
+
+% Curvatures
+subplot(2, 3, 4, 'Parent', tab5);
+plot(1:nControlPts, kappa(:, 1), 'b-', 'LineWidth', 2);
+xlabel('Control Point');
+ylabel('\kappa_x (1/m)');
+title('Curvature - X Direction');
+grid on;
+yline(0, 'k--', 'LineWidth', 0.5);
+
+subplot(2, 3, 5, 'Parent', tab5);
+plot(1:nControlPts, kappa(:, 2), 'r-', 'LineWidth', 2);
+xlabel('Control Point');
+ylabel('\kappa_y (1/m)');
+title('Curvature - Y Direction');
+grid on;
+yline(0, 'k--', 'LineWidth', 0.5);
+
+subplot(2, 3, 6, 'Parent', tab5);
+plot(1:nControlPts, kappa(:, 3), 'g-', 'LineWidth', 2);
+xlabel('Control Point');
+ylabel('\kappa_{xy} (1/m)');
+title('Twist Curvature');
+grid on;
+yline(0, 'k--', 'LineWidth', 0.5);
+
+%% ========================================================================
+%% TAB 6: SPATIAL DISTRIBUTION ON AIRFOIL (BASELINE)
+%% ========================================================================
+tab7 = uitab(tg, 'Title', 'Baseline: Spatial Distribution');
+
+% Maximum TW at each control point
+maxTW = max([TWBottom, TWMid, TWTop], [], 2);
+
+% Stress magnitude at midplane
+stressMag = sqrt(stressMid(:, :, 1).^2 + stressMid(:, :, 2).^2 + stressMid(:, :, 3).^2);
+maxStressMag = max(stressMag, [], 2);
+
+
+
+% Plot 1: Stress Magnitude Distribution
+subplot(2, 1, 1, 'Parent', tab7);
+scatter(controlPoints(:,1), controlPoints(:,2), 200, maxStressMag/1e6, 'filled', ...
+    'MarkerEdgeColor', 'k', 'LineWidth', 1.5);
+hold on;
+plot(Coordinates(:,1), Coordinates(:,2), 'k-', 'LineWidth', 2);
+colormap(gca, hot);
+cb = colorbar;
+ylabel(cb, 'Max Stress (MPa)');
+axis equal;
+xlabel('X (m)');
+ylabel('Y (m)');
+title('Maximum Stress Magnitude Distribution');
+grid on;
+
+
+% Plot 2: Safety Factor Distribution
+subplot(2, 1, 2, 'Parent', tab7);
+safetyFactor = 1 ./ maxTW;
+safetyFactor(safetyFactor > 5) = 5;  % Cap at 5 for visualization
+scatter(controlPoints(:,1), controlPoints(:,2), 200, safetyFactor, 'filled', ...
+    'MarkerEdgeColor', 'k', 'LineWidth', 1.5);
+hold on;
+plot(Coordinates(:,1), Coordinates(:,2), 'k-', 'LineWidth', 2);
+colormap(gca, parula);
+cb = colorbar;
+ylabel(cb, 'Factor of Safety (capped at 5)');
+axis equal;
+xlabel('X (m)');
+ylabel('Y (m)');
+title('Factor of Safety Distribution');
+grid on;
+
+%% Print Summary Statistics
+fprintf('\n--- Baseline Analysis Summary ---\n');
+fprintf('Maximum Tsai-Wu Index: %.4f\n', max(maxTW));
+fprintf('Minimum Factor of Safety: %.4f\n', 1/max(maxTW));
+fprintf('Maximum Stress: %.2f MPa\n', max(maxStressMag)/1e6);
+fprintf('Maximum Strain: %.2f με\n', max(abs(epsilon0(:)))*1e6);
+fprintf('Maximum Curvature: %.4e 1/m\n', max(abs(kappa(:))));
+fprintf('Critical Location: Control Point %d\n', find(maxTW == max(maxTW), 1));
+
+[~, critPly] = max(max([TWBottom; TWMid; TWTop]));
+fprintf('Critical Ply: Ply %d (%d°)\n', critPly, PlyAnglesCol(critPly));
+fprintf('=================================\n\n');
+
+fprintf('Baseline analysis complete! Review the tabbed figure for detailed results.\n\n');
